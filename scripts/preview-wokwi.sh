@@ -66,6 +66,8 @@ build_firmware() {
 ensure_wokwi_cli() {
   echo "[2/4] 检查 wokwi-cli..."
 
+  export PATH="$HOME/.wokwi/bin:$HOME/.local/bin:$PATH"
+
   if command -v wokwi-cli >/dev/null 2>&1; then
     return
   fi
@@ -76,19 +78,60 @@ ensure_wokwi_cli() {
     exit 1
   fi
 
-  echo "未检测到 wokwi-cli，尝试自动安装（最多等待 180 秒）..."
-  if ! (curl --connect-timeout 10 --max-time 180 -fsSL https://wokwi.com/ci/install.sh | sh); then
-    echo "错误：自动安装 wokwi-cli 失败或超时。" >&2
+  echo "未检测到 wokwi-cli，尝试官方安装脚本（最多等待 180 秒）..."
+  if (curl --http1.1 --connect-timeout 10 --max-time 180 -fsSL https://wokwi.com/ci/install.sh | sh); then
+    export PATH="$HOME/.wokwi/bin:$HOME/.local/bin:$PATH"
+  fi
+
+  if command -v wokwi-cli >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "官方安装脚本失败，尝试 GitHub Release 直连安装..."
+
+  local os arch asset_name download_url target
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "${os}-${arch}" in
+    Darwin-arm64)
+      asset_name="wokwi-cli-macos-arm64"
+      ;;
+    Darwin-x86_64)
+      asset_name="wokwi-cli-macos-x64"
+      ;;
+    Linux-x86_64)
+      asset_name="wokwi-cli-linuxstatic-x64"
+      ;;
+    Linux-aarch64|Linux-arm64)
+      asset_name="wokwi-cli-linuxstatic-arm64"
+      ;;
+    *)
+      echo "错误：当前平台 ${os}-${arch} 暂不支持自动安装 wokwi-cli。" >&2
+      echo "请手动安装: https://docs.wokwi.com/wokwi-ci/cli-installation" >&2
+      exit 1
+      ;;
+  esac
+
+  target="$HOME/.local/bin/wokwi-cli"
+  download_url="https://github.com/wokwi/wokwi-cli/releases/latest/download/${asset_name}"
+
+  mkdir -p "$HOME/.local/bin"
+
+  if ! curl --http1.1 -fL --retry 5 --retry-delay 2 --connect-timeout 20 --max-time 900 "$download_url" -o "$target"; then
+    echo "错误：从 GitHub Release 安装 wokwi-cli 失败。" >&2
     echo "请参考手动安装文档: https://docs.wokwi.com/wokwi-ci/cli-installation" >&2
     exit 1
   fi
 
-  export PATH="$HOME/.wokwi/bin:$HOME/.local/bin:$PATH"
+  chmod +x "$target"
 
-  if ! command -v wokwi-cli >/dev/null 2>&1; then
-    echo "错误：wokwi-cli 自动安装后仍不可用，请检查安装日志或手动安装。" >&2
+  if ! "$target" --version >/dev/null 2>&1; then
+    echo "错误：wokwi-cli 安装后不可执行，请检查文件权限。" >&2
     exit 1
   fi
+
+  export PATH="$HOME/.wokwi/bin:$HOME/.local/bin:$PATH"
 }
 
 ensure_wokwi_token() {
@@ -162,8 +205,15 @@ main() {
   ensure_wokwi_cli
   ensure_wokwi_token
 
-  echo "[4/4] 启动 Wokwi 仿真（timeout: 120000ms）..."
-  wokwi-cli --timeout 120000 "$PROJECT_ROOT"
+  echo "[4/4] 启动 Wokwi 仿真并等待股价抓取（timeout: 120000ms）..."
+
+  local serial_log
+  serial_log="$PROJECT_ROOT/artifacts/wokwi-serial.log"
+  mkdir -p "$PROJECT_ROOT/artifacts"
+
+  wokwi-cli --timeout 120000 --expect-text "[quote] ok" --serial-log-file "$serial_log" "$PROJECT_ROOT"
+
+  echo "Wokwi 仿真完成，串口日志：$serial_log"
 }
 
 main "$@"
